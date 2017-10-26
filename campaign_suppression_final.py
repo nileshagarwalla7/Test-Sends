@@ -142,7 +142,7 @@ try :
 	parser.add_argument("--job_type", help="Write dev or prod or test")
 	
 	parser.add_argument("--run_date", help="Write launch_date like Y-M-D")
-	parser.add_argument("--testType", help="AUTOTEST or MANUAL")
+	parser.add_argument("--test_type", help="AUTOTEST or MANUAL or BACKUP OR XYZ")
 	parser.add_argument("--campaign_id", help="Campaign ID or Null")
 	parser.add_argument("--email_address", help="Enter email address")
 
@@ -152,15 +152,22 @@ try :
 	
 	if job_type == 'test':
 		run_date = args.run_date
-		testType = args.testType
+		test_type = args.test_type
 		
-	if testType in ('AUTOTEST','MANUAL'):
-		campaign_id = args.campaign_id
-		email_address = args.email_address
+		if test_type == 'MANUAL':
+			campaign_id = args.campaign_id
+			email_address = args.email_address
+		elif test_type == 'AUTOTEST':
+			email_address = args.email_address
 	
 	#locale_name = 'en_nz' #this will have to be commented out during the migration to jenkins
 	#job_type = 'test' #this variable will always be prod for Jenkin jobs
-	#run_date = '2017-10-20'
+	
+	#run_date = '2017-10-29'
+	#test_type = 'BACKUP'
+	
+	#campaign_id = 1
+	#email_address = 'xxx@expedia.com'
 	
 	#hard-coded variables
 	data_environ = 'prod'
@@ -189,14 +196,14 @@ try :
 		success_str='Campaign Suppression process completed'
 		failure_str='Campaign Suppression process failed'
 	elif job_type == 'test':
-		if testType in ('AUTOTEST','MANUAL'):
+		if test_type != 'BACKUP':
 			CentralLog_str='Orchestration.dbo.CentralLog_LTS'
 			AlphaProcessDetailsLog_str='Orchestration.dbo.AlphaProcessDetailsLog_LTS'
 			success_str='Live Test Sends completed'
 			failure_str='Live Test Sends failed'
 		else:
-			CentralLog_str='Orchestration.dbo.CentralLog_LTS'
-			AlphaProcessDetailsLog_str='Orchestration.dbo.AlphaProcessDetailsLog_LTS'
+			CentralLog_str='Orchestration.dbo.CentralLog'
+			AlphaProcessDetailsLog_str='Orchestration.dbo.AlphaProcessDetailsLog'
 			success_str='Campaign Suppression process completed'
 			failure_str='Campaign Suppression process failed'
 	
@@ -215,9 +222,13 @@ else:
 	LaunchDate = run_date
 	
 #LaunchDate = ISTLauchDate
-
 print("LaunchDate = " + str(LaunchDate))
 
+#print("Central log: ", CentralLog_str)
+#print("Alpha details log: ", AlphaProcessDetailsLog_str)
+#print("Success msg: ", success_str)
+#print("Failuer msg: ", failure_str)
+	
 StartDate = get_pst_date() #pacific standard time
 
 tableName = ['campaign_definition','template_definition','segment_module','module_variable_definition','segment_definition'
@@ -368,10 +379,17 @@ dfMetaCampaignData1 = (dfCampaignDefinition
 
 
 if job_type == 'test':									
-	if testType == 'MANUAL':
+	if test_type == 'MANUAL':
 		campaign_id_filter="campaign_id="+str(campaign_id)
 		dfMetaCampaignData1=dfMetaCampaignData1.filter(campaign_id_filter)      #filtering dfMetaCampaignData1 on the basis of campaign id parameter
-									
+		
+		if dfMetaCampaignData1.count() <= 0 :
+		    condition_str2 = 'Campaign id {} entered for locale {} on {} does not exist'.format(campaign_id,locale_name,LaunchDate)
+		    log_df_update(sqlContext,0,condition_str2,get_pst_date(),'','0',AlphaStartDate,' ',AlphaProcessDetailsLog_str)
+		    log_df_update(sqlContext,0,condition_str2,get_pst_date(),'','0',AlphaStartDate,' ',CentralLog_str)
+		    print (condition_str2)
+		    #sys.exit()
+			
 dfMetaCampaignData2 = (dfMetaCampaignData1.join(dfTemplateDefinition.filter("template_deleted_flag = 0"),'template_id','inner')
 																		 .join(dfSegmentModule.filter("seg_mod_deleted_flag = 0"),'segment_module_map_id','inner')
 																		 .join(dfModuleDefinition,['locale','module_type_id','tpid','eapid','placement_type','channel'],'inner')                      
@@ -629,13 +647,11 @@ print("Columns required from TP data: ", tp_cols)
 dfTraveler_before_suppression = (sqlContext.read.parquet(File_path).select(tp_cols).filter("mer_status = 1").withColumn("locale",lower_locale_udf("locale")))
 dfTraveler = suppressCustomersBasedOnBusinessRules(dfTraveler_before_suppression).cache()
 
-print("------------TP data imported with {} columns".format(len(tp_cols)))
-
 #Traveler sampling
 
 # define the sample size
 if job_type == 'test':
-	if testType in ('AUTOTEST','MANUAL'):
+	if test_type in ('AUTOTEST','MANUAL'):
 
 		try:
 		   percent_sample = 0.01
@@ -657,14 +673,24 @@ if job_type == 'test':
 		   log_df_update(sqlContext,0,failure_str,get_pst_date(),'Error','0',AlphaStartDate,' ',CentralLog_str)
 		   raise Exception("Error in Traveler sampling!!!")
 
-	elif testType not in ('AUTOTEST','MANUAL'):
+	elif test_type not in ('AUTOTEST','MANUAL'):
 		dfTravelers = (dfTraveler.repartition(rep).cache())
 		
 elif job_type=='prod':
 	dfTravelers = (dfTraveler.repartition(rep).cache())
 
-		
-log_df_update(sqlContext,1,'TP data imported with {} columns'.format(len(tp_cols)),get_pst_date(),'','0',StartDate,File_path,AlphaProcessDetailsLog_str)
+dfTravelers_cnt = dfTravelers.count()
+
+if job_type == 'prod':
+    prnt_str = 'No Sampling required'
+elif job_type == 'test':
+    if test_type == 'BACKUP':
+        prnt_str = 'No Sampling required'
+    else:
+        prnt_str = 'Reading only 1% of TP data'
+
+log_df_update(sqlContext,1,'TP data imported, {} columns, {}'.format(len(tp_cols), prnt_str),get_pst_date(),'',dfTravelers_cnt,StartDate,File_path,AlphaProcessDetailsLog_str)
+print("------------TP data imported, {} columns, {}, #records:{}".format(len(tp_cols), prnt_str, dfTravelers_cnt))
 
 ### importing traveler-segment mapped data
 StartDate = get_pst_date()
@@ -1619,7 +1645,7 @@ StartDate = get_pst_date()
 tpid_eapid_brand_posa_mappings=importSQLTable("OcelotStaging","tpid_eapid_brand_posa_mappings")
 
 if job_type == 'test':
-	if testType in ('AUTOTEST','MANUAL'):
+	if test_type in ('AUTOTEST','MANUAL'):
 		tpid_eapid_brand_posa_mappings=tpid_eapid_brand_posa_mappings.withColumn('posa',lit('X'))
 
 tpid_eapid_brand_posa_mappings = tpid_eapid_brand_posa_mappings.filter(posa_filter)
@@ -1711,17 +1737,19 @@ for row in dfOmnitureMaster_update.rdd.collect():
 			PartitionDateKey,Environment,LoadDate)
 	)
 
-#print ("Data going into Omniture_master_write: ",unique_campaign_info)
-
 ## make 1 connection and write all data to Omniture_Master_ForAlpha to get SIDs
 
-if   job_type == 'test':
-	Omniture_master_write(sqlContext,unique_campaign_info,'OcelotStaging.dbo.Omniture_Master_ForAlpha_LTS')
-	Omniture_Master = importSQLTable('OcelotStaging','Omniture_Master_ForAlpha_LTS')
-elif job_type=='prod':
-	Omniture_master_write(sqlContext,unique_campaign_info,'OcelotStaging.dbo.Omniture_Master_ForAlpha')
-	Omniture_Master = importSQLTable('OcelotStaging','Omniture_Master_ForAlpha')
-	
+if job_type == 'prod':
+    Omniture_master_write(sqlContext,unique_campaign_info,'OcelotStaging.dbo.Omniture_Master_ForAlpha')
+    Omniture_Master = importSQLTable('OcelotStaging','Omniture_Master_ForAlpha')
+elif job_type == 'test':
+    if test_type == 'BACKUP':
+        Omniture_master_write(sqlContext,unique_campaign_info,'OcelotStaging.dbo.Omniture_Master_ForAlpha')
+        Omniture_Master = importSQLTable('OcelotStaging','Omniture_Master_ForAlpha')
+    elif test_type != 'BACKUP':
+        Omniture_master_write(sqlContext,unique_campaign_info,'OcelotStaging.dbo.Omniture_Master_ForAlpha_LTS')
+        Omniture_Master = importSQLTable('OcelotStaging','Omniture_Master_ForAlpha_LTS')
+
 filter_cond = "CampaignDate="+'"'+str(campaignDate)+'"'+" and Locale ="+'"'+str(locale_name)+'"'
 Omniture_Master = Omniture_Master.filter(filter_cond).withColumnRenamed("CampaignID","campaign_id").withColumnRenamed("Locale","locale")
 		
@@ -1791,7 +1819,7 @@ final_result_moduleCount=(final_result_moduleCount
 			
 final_result_moduleCount=final_result_moduleCount.select([c for c in final_result_moduleCount.columns if c not in {"Subchannel","Program","Campaign_Code","Lob_Intent","BRAND","posa","IssueID","SID","row_id","padded","keyID", "LaunchDate"}])
 
-print("------------Loacale: ", search_string)
+print("------------Locale: ", search_string)
 final_result_moduleCount = final_result_moduleCount.drop("locale").withColumn("Locale",lit(search_string))
 final_result_moduleCount.repartition(rep)
 final_result_moduleCount.cache()
@@ -1806,26 +1834,26 @@ print("------------Recipient ID done")
 if job_type == 'test':
 
 	try:
-		if testType in ('AUTOTEST','MANUAL'):
+		if test_type in ('AUTOTEST','MANUAL'):
 			window = Window.partitionBy(final_result_moduleCount['OmniExtNewFormat']).orderBy(rand())
 			final_result_moduleCount=final_result_moduleCount.withColumn("rank",rank().over(window)).filter(col('rank')<=5).drop('rank')
 			final_result_moduleCount.cache()
-			final_result_moduleCount.count()
-			log_df_update(sqlContext,1,'Omni-Extension sampling done',get_pst_date(),' ',str(final_result_moduleCount.count()),StartDate,' ',AlphaProcessDetailsLog_str)  
+			rec_cnt = final_result_moduleCount.count()
+			log_df_update(sqlContext,1,'Omni-Extension sampling done',get_pst_date(),' ',rec_cnt,StartDate,' ',AlphaProcessDetailsLog_str)  
 		
 	except:
-		log_df_update(sqlContext,1,'Error in Omni-Extension sampling',get_pst_date(),'Error',str(final_result_moduleCount.count()),StartDate,' ',AlphaProcessDetailsLog_str) 
+		log_df_update(sqlContext,1,'Error in Omni-Extension sampling',get_pst_date(),'Error',rec_cnt,StartDate,' ',AlphaProcessDetailsLog_str) 
 		log_df_update(sqlContext,0,failure_str,get_pst_date(),'Error','0',StartDate,' ',AlphaProcessDetailsLog_str)
 		log_df_update(sqlContext,0,failure_str,get_pst_date(),'Error','0',AlphaStartDate,' ',CentralLog_str)
 		raise Exception("Error in Omni-Extension sampling!!!")
 	
 	try:
-		if testType in ('AUTOTEST','MANUAL'):
+		if test_type in ('AUTOTEST','MANUAL'):
 			final_result_moduleCount=final_result_moduleCount.withColumn('EmailAddress',lit(email_address))
-			log_df_update(sqlContext,1,'Email addresses changed',get_pst_date(),' ',str(final_result_moduleCount.count()),StartDate,' ',AlphaProcessDetailsLog_str) 
+			log_df_update(sqlContext,1,'Email addresses changed',get_pst_date(),' ',rec_cnt,StartDate,' ',AlphaProcessDetailsLog_str) 
 		
 	except:
-		log_df_update(sqlContext,1,'Error in Email address change',get_pst_date(),'Error',str(final_result_moduleCount.count()),StartDate,' ',AlphaProcessDetailsLog_str)
+		log_df_update(sqlContext,1,'Error in Email address change',get_pst_date(),'Error',rec_cnt,StartDate,' ',AlphaProcessDetailsLog_str)
 		log_df_update(sqlContext,0,failure_str,get_pst_date(),'Error','0',StartDate,' ',AlphaProcessDetailsLog_str)
 		log_df_update(sqlContext,0,failure_str,get_pst_date(),'Error','0',AlphaStartDate,' ',CentralLog_str)
 		raise Exception("Error in Email address change!!!")   
@@ -1862,9 +1890,9 @@ path_mod_ls = []
 for i in cid:
 
 	if job_type == 'test':	
-		if(testType=='MANUAL'):
+		if(test_type=='MANUAL'):
 			file_name_s3 = atn[cid.index(i)]+"_MTS"
-		elif(testType=='AUTOTEST'):
+		elif(test_type=='AUTOTEST'):
 			file_name_s3 = atn[cid.index(i)]+"_ATS"	
 		else:
 			file_name_s3 = atn[cid.index(i)]
@@ -1972,7 +2000,10 @@ log_df_update(sqlContext,1,'Writing campaign meta data',get_pst_date(),' ','0',S
 log_df_update(sqlContext,1,success_str,get_pst_date(),' ','0',AlphaStartDate,output_rdd_path,AlphaProcessDetailsLog_str)
 log_df_update(sqlContext,1,success_str,get_pst_date(),' ','0',AlphaStartDate,output_rdd_path,CentralLog_str)
 
-if 	job_type == 'test':
-	print("------------Live Test Sends Completed")
-else:
-	print("------------Campaign Suppression Completed")
+if job_type == 'prod':
+    print("------------Campaign Suppression Completed")
+elif job_type == 'test':
+    if test_type == 'BACKUP':
+        print("------------Campaign Suppression Completed")
+    elif test_type != 'BACKUP':
+        print("------------Test Sends Completed")
