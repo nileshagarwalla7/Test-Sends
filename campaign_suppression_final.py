@@ -41,26 +41,16 @@ def lower_locale(locale):
 
 lower_locale_udf = udf(lower_locale,StringType())
 
-def clear_running_table(locale_name):
+### Function for importing SQL table
+def importSQLTable(dbname, tablename):
+	temp = (sqlContext.read.format("jdbc")
+	.option("url", severName.value)
+	.option("driver",severProperties.value["driver"])
+	.option("dbtable", dbname+".dbo."+tablename)
+	.option("user", severProperties.value["user"])
+	.option("password", severProperties.value["password"]).load())
+	return temp
 
-	while(1):
-		try:
-			T1=sqlContext.read.parquet("s3n://big-data-analytics-scratch-prod/project_traveler_profile/affine/alphaToSqlTest/running_table")
-			T1_cnt = T1.count()
-			print("Running table count: ", T1_cnt)
-			break
-		except:
-			raise Exception ("Running table not present in S3")
-
-	if T1.count() <= 0:
-		print("No job currently running. Running table empty")
-	else:
-		T2=T1.filter("Locale!='{}'".format(locale_name))
-		T2.distinct().coalesce(10).write.mode("overwrite").parquet("s3n://big-data-analytics-scratch-prod/project_traveler_profile/affine/alphaToSqlTest/running_table_temp")
-		T4=sqlContext.read.parquet("s3n://big-data-analytics-scratch-prod/project_traveler_profile/affine/alphaToSqlTest/running_table_temp")
-		T4.distinct().coalesce(10).write.mode("overwrite").parquet("s3n://big-data-analytics-scratch-prod/project_traveler_profile/affine/alphaToSqlTest/running_table")	
-
-		
 def importSQLTableForBusinessBasedSuppression(query):
 	temp = (sqlContext.read.format("jdbc").
 		option("url", "jdbc:sqlserver://10.23.19.63").
@@ -86,10 +76,6 @@ def suppressCustomersBasedOnBusinessRules(dfTravelers):
 
 AlphaStartDate = get_pst_date()
 print("AlphaStartDate = ",AlphaStartDate)
-
-### sql server info for writing log table 
-properties = {"user" : "occuser" , "password":"Exp3dia22" , "driver":"com.microsoft.sqlserver.jdbc.SQLServerDriver"}
-url = "jdbc:sqlserver://10.23.18.135"
 
 ### defining log id initiation
 rep = 1440
@@ -138,8 +124,9 @@ StartDate = get_pst_date()
 try :
 
 	parser = argparse.ArgumentParser()
-	parser.add_argument("--locale_name", help="Write locale_name like en_nz")
-	parser.add_argument("--job_type", help="Write dev or prod or test")
+	parser.add_argument("--locale_name", help="Write locale_name like en_nz. This is manadatory.")
+	parser.add_argument("--job_type", help="Write prod or test. This is manadatory. Used to determine type of job")
+	parser.add_argument("--env_type", help="Write prod or test. This is manadatory. Used to determine data source")
 	
 	parser.add_argument("--run_date", help="Write launch_date like Y-M-D")
 	parser.add_argument("--test_type", help="AUTOTEST or MANUAL or BACKUP OR XYZ")
@@ -149,19 +136,21 @@ try :
 	args = parser.parse_args()
 	locale_name = args.locale_name
 	job_type = args.job_type
+	env_type = args.env_type
 	
 	if job_type == 'test':
 		run_date = args.run_date
 		test_type = args.test_type
 		
 		if test_type == 'MANUAL':
-			campaign_id = args.campaign_id
 			email_address = args.email_address
+			campaign_id = args.campaign_id
 		elif test_type == 'AUTOTEST':
 			email_address = args.email_address
 	
 	#locale_name = 'en_nz' #this will have to be commented out during the migration to jenkins
 	#job_type = 'test' #this variable will always be prod for Jenkin jobs
+	#env_type = 'test'
 	
 	#run_date = '2017-10-29'
 	#test_type = 'BACKUP'
@@ -169,12 +158,22 @@ try :
 	#campaign_id = 1
 	#email_address = 'xxx@expedia.com'
 	
+	### sql server info for writing log table
+	properties = {"user" : "occuser" , "password":"Exp3dia22" , "driver":"com.microsoft.sqlserver.jdbc.SQLServerDriver"}
+	if env_type == 'prod':
+		url = "jdbc:sqlserver://10.23.18.135"
+	else:
+		url = "jdbc:sqlserver://10.23.16.35"
+	
+	severName = sc.broadcast(url)
+	severProperties = sc.broadcast(properties)
+	
 	#hard-coded variables
-	data_environ = 'prod'
+	data_environ = env_type ##for production it should be always 'prod'
 	pos = locale_name.split('_')[1].upper()
 	current_date =  time.strftime("%Y/%m/%d")
 	
-	status_table = (sqlContext.read.format("jdbc").option("url", "jdbc:sqlserver://10.23.18.135").option("driver","com.microsoft.sqlserver.jdbc.SQLServerDriver").option("dbtable", "Orchestration.dbo.AlphaConfig").option("user", "occuser").option("password", "Exp3dia22").load())
+	status_table = importSQLTable("Orchestration","AlphaConfig")
 	pos1 = locale_name.split('_')[1].upper() #Converting the country to uppercase
 	pos0 = locale_name.split('_')[0]  #Obtaining the language code
 	
@@ -221,33 +220,26 @@ if 	job_type == 'prod':
 else:
 	LaunchDate = run_date
 	
+file_dt = (LaunchDate.split("-")[0]) + (LaunchDate.split("-")[1]) + (LaunchDate.split("-")[2])
+	
 #LaunchDate = ISTLauchDate
 print("LaunchDate = " + str(LaunchDate))
 
 #print("Central log: ", CentralLog_str)
 #print("Alpha details log: ", AlphaProcessDetailsLog_str)
 #print("Success msg: ", success_str)
-#print("Failuer msg: ", failure_str)
+#print("Failure msg: ", failure_str)
 	
 StartDate = get_pst_date() #pacific standard time
 
 tableName = ['campaign_definition','template_definition','segment_module','module_variable_definition','segment_definition'
 					,'module_definition']
 
-
-#importing files from server
-def importFiles(x):
-	temp = (sqlContext.read.format("jdbc")
-								 .option("url", "jdbc:sqlserver://10.23.18.135")
-								 .option("driver","com.microsoft.sqlserver.jdbc.SQLServerDriver")
-								 .option("dbtable", "AlphaMVP.dbo."+x).option("user", "occuser")
-								.option("password", "Exp3dia22").load())
-	return temp
 #writing the different tables in 'df'+tableName format
 try :
 	for name in tableName:
 		data_framename = 'df'+(''.join([i.title() for i in name.split('.')[0].split('_')]))
-		globals()[data_framename] = (importFiles("{}_{}".format(name,data_environ))).drop("id") 
+		globals()[data_framename] = (importSQLTable("AlphaMVP","{}_{}".format(name,data_environ))).drop("id") 
 
 	log_df_update(sqlContext,1,'Campaign config files are imported',get_pst_date(),' ','0',StartDate,' ',AlphaProcessDetailsLog_str)
 
@@ -303,19 +295,10 @@ EDEtable=EDEtable.withColumn("LaunchDate",EDEtable["LaunchDate"].cast(StringType
 
 #reading the tables
 #gives information about the completion status, launch and end dates
-central_log_table = (sqlContext.read.format("jdbc")
-						 .option("url", "jdbc:sqlserver://10.23.18.135")
-						 .option("driver","com.microsoft.sqlserver.jdbc.SQLServerDriver")
-						 .option("dbtable", "Orchestration.dbo.CentralLog").option("user", "occuser")
-						.option("password", "Exp3dia22").load())
+central_log_table = importSQLTable("Orchestration","CentralLog")
 
 #gives details on cluster and job
-etl_config_table = (sqlContext.read.format("jdbc")
-						 .option("url", "jdbc:sqlserver://10.23.18.135")
-						 .option("driver","com.microsoft.sqlserver.jdbc.SQLServerDriver")
-						 .option("dbtable", "Orchestration.dbo.ETLconfig").option("user", "occuser")
-						.option("password", "Exp3dia22").load())
-
+etl_config_table = importSQLTable("Orchestration","ETLconfig")
 
 etl_config_table = etl_config_table.withColumnRenamed("ScheduleTimes ","ScheduleTimes")
 etl_config_table = etl_config_table.withColumnRenamed("Job_Name ","Job_Name")
@@ -393,7 +376,7 @@ if job_type == 'test':
 dfMetaCampaignData2 = (dfMetaCampaignData1.join(dfTemplateDefinition.filter("template_deleted_flag = 0"),'template_id','inner')
 																		 .join(dfSegmentModule.filter("seg_mod_deleted_flag = 0"),'segment_module_map_id','inner')
 																		 .join(dfModuleDefinition,['locale','module_type_id','tpid','eapid','placement_type','channel'],'inner')                      
-																		 .join(dfSegmentDefinition.filter("segment_deleted_flag = 0"),["tpid","eapid","segment_type_id"],'inner'))
+																		 .join(dfSegmentDefinition.filter("segment_deleted_flag = 0"),["tpid","eapid","segment_type_id"],'inner')).filter("status != 'archived'")
 
 #Change 1: We need the status column identify modules that are test published
 dfMetaCampaignData_31 = (dfMetaCampaignData2.select([c for c in dfMetaCampaignData2.columns if c not in
@@ -642,55 +625,12 @@ tp_cols = list(set(reqd_cols + joining_cols_final + content_cols_final))
 
 print("Columns required from TP data: ", tp_cols)
 
-#dfTraveler = (sqlContext.read.parquet(File_path).select(tp_cols).filter("mer_status = 1").withColumn("locale",lower_locale_udf("locale")).cache())
-
 dfTraveler_before_suppression = (sqlContext.read.parquet(File_path).select(tp_cols).filter("mer_status = 1").withColumn("locale",lower_locale_udf("locale")))
 dfTraveler = suppressCustomersBasedOnBusinessRules(dfTraveler_before_suppression).cache()
+dfTravelers = (dfTraveler.repartition(rep).cache())
 
-#Traveler sampling
-
-# define the sample size
-if job_type == 'test':
-	if test_type in ('AUTOTEST','MANUAL'):
-
-		try:
-		   percent_sample = 0.01
-		   frac = dict(
-				(e.test_keys, percent_sample) 
-				for e 
-			  in dfTraveler.select("test_keys").distinct().collect()
-			  )
-		   
-		   sampled = dfTraveler.sampleBy("test_keys", fractions=frac)
-		   print(dfTraveler.count())
-		   print(sampled.count())
-		   log_df_update(sqlContext,1,'Traveler data sampled',get_pst_date(),' ',str(sampled.count()),StartDate,' ',AlphaProcessDetailsLog_str) 
-		   dfTravelers = (sampled.repartition(rep).cache())
-		
-		except:
-		   log_df_update(sqlContext,0,'Error in Traveler sampling',get_pst_date(),'Error','0',StartDate,' ',AlphaProcessDetailsLog_str)
-		   log_df_update(sqlContext,0,failure_str,get_pst_date(),'Error','0',StartDate,' ',AlphaProcessDetailsLog_str)
-		   log_df_update(sqlContext,0,failure_str,get_pst_date(),'Error','0',AlphaStartDate,' ',CentralLog_str)
-		   raise Exception("Error in Traveler sampling!!!")
-
-	elif test_type not in ('AUTOTEST','MANUAL'):
-		dfTravelers = (dfTraveler.repartition(rep).cache())
-		
-elif job_type=='prod':
-	dfTravelers = (dfTraveler.repartition(rep).cache())
-
-dfTravelers_cnt = dfTravelers.count()
-
-if job_type == 'prod':
-    prnt_str = 'No Sampling required'
-elif job_type == 'test':
-    if test_type == 'BACKUP':
-        prnt_str = 'No Sampling required'
-    else:
-        prnt_str = 'Reading only 1% of TP data'
-
-log_df_update(sqlContext,1,'TP data imported, {} columns, {}'.format(len(tp_cols), prnt_str),get_pst_date(),'',dfTravelers_cnt,StartDate,File_path,AlphaProcessDetailsLog_str)
-print("------------TP data imported, {} columns, {}, #records:{}".format(len(tp_cols), prnt_str, dfTravelers_cnt))
+log_df_update(sqlContext,1,'TP data imported with {} columns'.format(len(tp_cols)),get_pst_date(),'',dfTravelers_cnt,StartDate,File_path,AlphaProcessDetailsLog_str)
+print("------------TP data imported with {} columns".format(len(tp_cols)))
 
 ### importing traveler-segment mapped data
 StartDate = get_pst_date()
@@ -702,14 +642,22 @@ seg_log_id = seg_detailed_log_list['LogID']
 File_path_seg = seg_detailed_log_list['FilePath']
 print("Segment-mapping data path: ",File_path_seg)
 
+###the following function is required to convert a tuple with 1 element from (x,) format to just (x) format
+def tuple_to_str(t):
+    t = tuple(t)
+    if len(t) == 1:
+        return '({!r})'.format(t[0])
+    return repr(t)
+
+seg_filter = "segment_type_id in " + str(tuple_to_str(dfMetaCampaign.select("campaign_segment_type_id").rdd.flatMap(lambda x: x).collect()))
+print("Segments required for the launching campaigns: ", seg_filter)
+
 try :
-	traveler = (sqlContext.read.
-					parquet(File_path_seg)
-					.repartition(rep))
+	traveler = (sqlContext.read.parquet(File_path_seg).filter(seg_filter).repartition(rep))
 	log_df_update(sqlContext,1,'Segment-mapping data imported',get_pst_date(),' ',str(0),StartDate,File_path_seg,AlphaProcessDetailsLog_str)
 	
 except :
-	log_df_update(sqlContext,0,'Failed',get_pst_date(),'Traveler-Segment data not present','0',StartDate,File_path,AlphaProcessDetailsLog_str)
+	log_df_update(sqlContext,0,'Failed',get_pst_date(),'Segment-mapping data not present','0',StartDate,File_path,AlphaProcessDetailsLog_str)
 	log_df_update(sqlContext,0,failure_str,get_pst_date(),'Error','0',AlphaStartDate,File_path,AlphaProcessDetailsLog_str)
 	log_df_update(sqlContext,0,failure_str,get_pst_date(),'Error','0',AlphaStartDate,File_path,CentralLog_str)
 	raise Exception("Segment-mapping data not present!!!")
@@ -723,21 +671,67 @@ dfTraveler_MetaCampaign = (traveler.withColumnRenamed("segment_type_id","campaig
 											.drop("")
 											 .distinct())
 
-final_df_for_alpha = (dfTraveler_MetaCampaign
+for_alpha = (dfTraveler_MetaCampaign
 												.join(dfTravelers,['email_address',"test_keys","tpid","eapid","locale"],'inner')
 												.distinct()
 												.repartition(rep)
 												.cache()
 											)
-log_rowcount = final_df_for_alpha.count()
+log_rowcount = for_alpha.count()
+
 if  log_rowcount <=0 :
 	check_str = 'check values of join keys namely segment_type_id, tpid,eapid and locale '
 	log_df_update(sqlContext,0,'Joining segment-mapping and traveler data',get_pst_date(),check_str,'0',StartDate,' ',AlphaProcessDetailsLog_str)
 	log_df_update(sqlContext,0,failure_str,get_pst_date(),'Error','0',AlphaStartDate,' ',AlphaProcessDetailsLog_str)
 	log_df_update(sqlContext,0,failure_str,get_pst_date(),'Error','0',AlphaStartDate,' ',CentralLog_str)
-	raise Exception("Error in creating final_df_for_alpha")
+	raise Exception("Error in creating for_alpha")
 else :
 	log_df_update(sqlContext,1,'Joining segment-mapping and traveler data',get_pst_date()," ",str(log_rowcount),StartDate,' ',AlphaProcessDetailsLog_str)
+
+StartDate = get_pst_date()
+
+# define the sample size
+if job_type == 'test':
+	if test_type != 'BACKUP':
+
+		try:
+		   percent_sample = 0.01
+		   frac = dict(
+				(e.test_keys, percent_sample) 
+				for e 
+			  in for_alpha.select("test_keys").distinct().collect()
+			  )
+		   
+		   sampled = for_alpha.sampleBy("test_keys", fractions=frac)
+		   print(for_alpha.count())
+		   print(sampled.count())
+		   log_df_update(sqlContext,1,'Customer base for campaign sampled',get_pst_date(),' ',str(sampled.count()),StartDate,' ',AlphaProcessDetailsLog_str) 
+		   final_df_for_alpha = (sampled.repartition(rep).cache())
+		
+		except:
+		   log_df_update(sqlContext,0,'Error in sampling',get_pst_date(),'Error','0',StartDate,' ',AlphaProcessDetailsLog_str)
+		   log_df_update(sqlContext,0,failure_str,get_pst_date(),'Error','0',StartDate,' ',AlphaProcessDetailsLog_str)
+		   log_df_update(sqlContext,0,failure_str,get_pst_date(),'Error','0',AlphaStartDate,' ',CentralLog_str)
+		   raise Exception("Error in sampling!!!")
+
+	elif test_type == 'BACKUP':
+		final_df_for_alpha = (for_alpha.repartition(rep).cache())
+		
+elif job_type=='prod':
+	final_df_for_alpha = (for_alpha.repartition(rep).cache())
+
+final_df_for_alpha_cnt = final_df_for_alpha.count()
+
+if job_type == 'prod':
+    prnt_str = 'No Sampling required'
+elif job_type == 'test':
+    if test_type == 'BACKUP':
+        prnt_str = 'No Sampling required'
+    else:
+        prnt_str = 'Reading 1% of eligible customer base'
+
+log_df_update(sqlContext,1,'Sampling completed, {}'.format(prnt_str),get_pst_date(),'',final_df_for_alpha_cnt,StartDate,File_path,AlphaProcessDetailsLog_str)
+print("------------Sampling completed,{}, #records:{}".format(prnt_str, final_df_for_alpha_cnt))
 
 
 StartDate = get_pst_date()
@@ -810,12 +804,7 @@ mis_content_dict = {}
 mis_data_rdd_dic = {}
 def readAllMisFiles(file_names):
 	for file_name in file_names:
-			 file = (sqlContext.read.format("jdbc").option("url", "jdbc:sqlserver://10.23.18.135")
-																.option("driver","com.microsoft.sqlserver.jdbc.SQLServerDriver")
-																 .option("dbtable", "AlphaMVP.dbo."+file_name)
-																 .option("user", "occuser")
-																 .option("password", "Exp3dia22")
-																 .load())
+			 file = importSQLTable("AlphaMVP",file_name)
 			 file = file.filter(pos_filter_cond)
 			 file.cache()
 			 mis_data_rdd_dic[file_name]=file #prints the schema, behaves as a pointer. doesn't store it in memory until this dictionary is used somewhere
@@ -1457,16 +1446,6 @@ module_count_map = (dfMetaCampaignData_VarDef
 
 #StartDate = get_pst_date()
 
-### functions needed
-def importSQLTable(dbname, tablename):
-	temp = (sqlContext.read.format("jdbc")
-	.option("url", url)
-	.option("driver",properties["driver"])
-	.option("dbtable", dbname+".dbo."+tablename)
-	.option("user", properties["user"])
-	.option("password", properties["password"]).load())
-	return temp
-
 def add_userToken(final_df,UT_table_name):
 	df_Tokens = importSQLTable("CampaignHistory",UT_table_name)
 	df_sub_tokens = importSQLTable("CampaignHistory","Subscriber_UserTokens")
@@ -1645,7 +1624,7 @@ StartDate = get_pst_date()
 tpid_eapid_brand_posa_mappings=importSQLTable("OcelotStaging","tpid_eapid_brand_posa_mappings")
 
 if job_type == 'test':
-	if test_type in ('AUTOTEST','MANUAL'):
+	if test_type != 'BACKUP':
 		tpid_eapid_brand_posa_mappings=tpid_eapid_brand_posa_mappings.withColumn('posa',lit('X'))
 
 tpid_eapid_brand_posa_mappings = tpid_eapid_brand_posa_mappings.filter(posa_filter)
@@ -1893,14 +1872,13 @@ for i in cid:
 		if(test_type=='MANUAL'):
 			file_name_s3 = atn[cid.index(i)]+"_MTS"
 		elif(test_type=='AUTOTEST'):
-			file_name_s3 = atn[cid.index(i)]+"_ATS"	
-		else:
-			file_name_s3 = atn[cid.index(i)]
-			
-		
-	elif job_type == 'prod':	
-		file_name_s3 = atn[cid.index(i)]
-	
+			file_name_s3 = atn[cid.index(i)]+"_ATS"
+		elif(test_type=='BACKUP'):
+			file_name_s3 = atn[cid.index(i)]+"_BACKUP_"+file_dt
+		elif(test_type not in ('AUTOTEST','MANUAL','BACKUP')):
+			file_name_s3 = atn[cid.index(i)]+"_"+str(test_type)
+	elif job_type == 'prod':
+		file_name_s3 = atn[cid.index(i)]	
 	sid_cid = sid[cid.index(i)]
 	mod_cnt = mc[cid.index(i)]
 	
